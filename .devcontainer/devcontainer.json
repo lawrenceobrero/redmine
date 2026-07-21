@@ -1,0 +1,16 @@
+{
+  "name": "redmine-review-agents (interactive mode)",
+  "image": "mcr.microsoft.com/devcontainers/typescript-node:22",
+  "postCreateCommand": "cd .github/agents && npm ci",
+  "customizations": {
+    "vscode": {
+      "extensions": ["dbaeumer.vscode-eslint"]
+    },
+    "codespaces": {
+      "openFiles": ["README.md"]
+    }
+  },
+  "hostRequirements": {
+    "cpus": 2
+  }
+}

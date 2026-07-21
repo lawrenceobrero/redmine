@@ -1,0 +1,17 @@
+diff --git a/app/helpers/projects_helper.rb b/app/helpers/projects_helper.rb
+index f079c74..1a9ac43 100644
+--- a/app/helpers/projects_helper.rb
++++ b/app/helpers/projects_helper.rb
+@@ -207,4 +207,12 @@ module ProjectsHelper
+       ancestors << project unless project.leaf?
+     end
+   end
++
++  # Returns the display names of users who authored the most recently
++  # updated issues, for the project overview sidebar.
++  def recent_issue_author_names(project, limit=10)
++    project.issues.order(:updated_on => :desc).limit(limit).map do |issue|
++      issue.author.try(:name)
++    end.compact.uniq
++  end
+ end

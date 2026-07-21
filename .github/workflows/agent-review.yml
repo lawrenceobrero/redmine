@@ -1,0 +1,141 @@
+# Agent review pipeline (live mode).
+#
+# Security model, in one place:
+# - Triggers on `pull_request` (NEVER `pull_request_target`), and the job-level
+#   `if` requires the head branch to live in THIS repository — a PR from a fork
+#   never reaches the job, the ANTHROPIC_API_KEY secret, or push rights.
+#   (GitHub additionally withholds secrets from fork-PR `pull_request` runs.)
+# - No self-triggering, three layers: (1) the Fixer pushes with GITHUB_TOKEN,
+#   and GITHUB_TOKEN events never start new workflow runs; (2) the actor guard
+#   below; (3) a step-level check that skips everything when the head commit
+#   was authored by the fixer bot.
+# - The concurrency group cancels a superseded run when the PR is updated
+#   mid-review (cost ceiling; the diff-size gate lives in the pipeline code).
+# - Least privilege: contents:write (gated Fixer commits) +
+#   pull-requests:write (comments). The pipeline has no merge call anywhere —
+#   a human always owns the merge.
+
+name: Agent Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+concurrency:
+  group: agent-review-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  review:
+    name: unit tests → reviewer → synthesis → fixer
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # HARD GATE: same-repo branches only — never fork PRs.
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.actor != 'github-actions[bot]'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0
+
+      - name: Guard — skip if the head commit is bot-authored (no self-trigger)
+        id: guard
+        run: |
+          AUTHOR="$(git log -1 --format='%an')"
+          SUBJECT="$(git log -1 --format='%s')"
+          if [ "$AUTHOR" = "redmine-agent-fixer" ] || printf '%s' "$SUBJECT" | grep -qF '[agent-fixer]'; then
+            echo "Head commit is a fixer-bot commit; nothing to do."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Redmine's Gemfile reads config/database.yml to pick the DB adapter gem,
+      # so the test database config must exist before `bundle install`.
+      - name: Configure test database (sqlite3)
+        if: steps.guard.outputs.skip != 'true'
+        run: |
+          cat > config/database.yml <<'EOF'
+          test:
+            adapter: sqlite3
+            database: db/test.sqlite3
+          EOF
+
+      - uses: ruby/setup-ruby@v1
+        if: steps.guard.outputs.skip != 'true'
+        with:
+          ruby-version: '3.3'
+          bundler-cache: true
+
+      - name: Prepare test database
+        if: steps.guard.outputs.skip != 'true'
+        run: |
+          bin/rails generate_secret_token
+          RAILS_ENV=test bin/rails db:migrate
+
+      # The gate is real but scoped: run the unit tests that map to the files
+      # this PR changed (full Redmine suite is far too slow for per-PR review).
+      - name: Select scoped unit tests for the changed files
+        if: steps.guard.outputs.skip != 'true'
+        id: tests
+        run: |
+          BASE="origin/${{ github.event.pull_request.base.ref }}"
+          MAPPED=""
+          for f in $(git diff --name-only "$BASE"...HEAD); do
+            case "$f" in
+              app/models/*.rb)      t="test/unit/$(basename "$f" .rb)_test.rb" ;;
+              app/helpers/*.rb)     t="test/helpers/$(basename "$f" .rb)_test.rb" ;;
+              app/controllers/*.rb) t="test/functional/$(basename "$f" .rb)_test.rb" ;;
+              lib/redmine/*.rb)     t="test/unit/lib/redmine/$(basename "$f" .rb)_test.rb" ;;
+              test/*_test.rb)       t="$f" ;;
+              *)                    t="" ;;
+            esac
+            [ -n "$t" ] && [ -f "$t" ] && MAPPED="$MAPPED $t"
+          done
+          MAPPED="$(echo "$MAPPED" | xargs -n1 2>/dev/null | sort -u | xargs)"
+          if [ -z "$MAPPED" ]; then
+            MAPPED="test/unit/news_test.rb"   # smoke fallback when nothing maps
+          fi
+          echo "Scoped tests: $MAPPED"
+          echo "cmd=bin/rails test $MAPPED" >> "$GITHUB_OUTPUT"
+
+      - name: Unit tests must pass before any review (gate)
+        if: steps.guard.outputs.skip != 'true'
+        run: RAILS_ENV=test ${{ steps.tests.outputs.cmd }}
+
+      - uses: actions/setup-node@v4
+        if: steps.guard.outputs.skip != 'true'
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: .github/agents/package-lock.json
+
+      - name: Install pipeline dependencies
+        if: steps.guard.outputs.skip != 'true'
+        working-directory: .github/agents
+        run: npm ci
+
+      - name: Gate + secret-scan unit tests for the pipeline itself
+        if: steps.guard.outputs.skip != 'true'
+        working-directory: .github/agents
+        run: npm test
+
+      - name: Reviewer → Synthesis → Fixer
+        if: steps.guard.outputs.skip != 'true'
+        working-directory: .github/agents
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          # The Fixer's change must keep the same scoped tests green before push.
+          RETEST_CMD: RAILS_ENV=test ${{ steps.tests.outputs.cmd }}
+        run: npm run live
