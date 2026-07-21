@@ -207,4 +207,12 @@ module ProjectsHelper
       ancestors << project unless project.leaf?
     end
   end
+
+  # Returns the display names of users who authored the most recently
+  # updated issues, for the project overview sidebar.
+  def recent_issue_author_names(project, limit=10)
+    project.issues.order(:updated_on => :desc).limit(limit).map do |issue|
+      issue.author.try(:name)
+    end.compact.uniq
+  end
 end
