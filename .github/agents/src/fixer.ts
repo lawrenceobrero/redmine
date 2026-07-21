@@ -77,6 +77,17 @@ export function applyFix(repoRoot: string, file: string, fix: Fix): { ok: boolea
   return { ok: true };
 }
 
+/** Exact pre-fix content, for precise rollback (a `git checkout --` would
+ *  also wipe unrelated uncommitted changes, e.g. interactive mode's applied
+ *  sample diff). */
+export function readFileInRepo(repoRoot: string, file: string): string {
+  return readFileSync(resolveInsideRepo(repoRoot, file), "utf8");
+}
+
+export function writeFileInRepo(repoRoot: string, file: string, content: string): void {
+  writeFileSync(resolveInsideRepo(repoRoot, file), content);
+}
+
 function resolveInsideRepo(repoRoot: string, file: string): string {
   const root = resolve(repoRoot);
   const abs = resolve(root, file);

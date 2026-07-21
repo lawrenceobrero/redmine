@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { parseDiff } from "../src/diff.js";
+import { lineDelta, parseDiff } from "../src/diff.js";
 import { LENSES } from "../src/lenses.js";
 import { computeVerdict, matchSnippet, verifyFindings } from "../src/synthesis.js";
 import type { Finding } from "../src/types.js";
@@ -67,6 +67,13 @@ test("parseDiff extracts added lines with correct new-file numbers", () => {
     files[0]!.addedLines.get(7),
     "    project.issues.limit(10).map { |issue| issue.author.name }.uniq",
   );
+});
+
+test("lineDelta measures a single-line replacement as +1/-1 (content-based)", () => {
+  const before = "a\nb\nc\nd";
+  assert.deepEqual(lineDelta(before, "a\nb2\nc\nd"), { added: 1, removed: 1 });
+  assert.deepEqual(lineDelta(before, before), { added: 0, removed: 0 });
+  assert.deepEqual(lineDelta(before, "a\nb\nx\ny\nc\nd"), { added: 2, removed: 0 });
 });
 
 // ---- matchSnippet -----------------------------------------------------------
@@ -141,4 +148,11 @@ test("verdict is CHANGES_REQUIRED only while a confirmed blocking finding remain
 
   const suggestion = confirmed.map((f) => ({ ...f, severity: "suggestion" as const }));
   assert.equal(computeVerdict(suggestion), "APPROVE_WITH_SUGGESTIONS");
+});
+
+test("a blocking finding whose fix was rejected still blocks the verdict", () => {
+  const repo = makeRepo();
+  const verified = verifyFindings([finding({})], repo, parseDiff(DIFF), LENSES);
+  const failed = verified.map((f) => ({ ...f, status: "fix_failed" as const }));
+  assert.equal(computeVerdict(failed), "CHANGES_REQUIRED");
 });

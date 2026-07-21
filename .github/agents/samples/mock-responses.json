@@ -1,0 +1,20 @@
+{
+  "_comment": "Canned LLM responses for LLM_BACKEND=mock — a deterministic, credential-free dry run of the full pipeline against samples/seeded-bug.diff. Everything downstream of the model (verification, diff gate, fix application, verdict, log) runs for real.",
+  "findings": {
+    "findings": [
+      {
+        "item": "CQ1",
+        "file": "app/helpers/projects_helper.rb",
+        "line": 214,
+        "snippet": "    project.issues.order(:updated_on => :desc).limit(limit).map do |issue|",
+        "issue": "N+1 query: the block calls issue.author for each issue, but the relation is built without eager loading, so every iteration issues its own SELECT on users.",
+        "suggestion": "Eager-load the association: project.issues.includes(:author).order(:updated_on => :desc).limit(limit)"
+      }
+    ]
+  },
+  "fix": {
+    "search": "    project.issues.order(:updated_on => :desc).limit(limit).map do |issue|",
+    "replace": "    project.issues.includes(:author).order(:updated_on => :desc).limit(limit).map do |issue|",
+    "rationale": "Adds includes(:author) so the authors are loaded in one query instead of one per issue — the smallest change that removes the N+1."
+  }
+}

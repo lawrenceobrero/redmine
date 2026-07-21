@@ -86,8 +86,10 @@ export function verifyFindings(
 }
 
 export function computeVerdict(verified: VerifiedFinding[]): Verdict {
-  const confirmed = verified.filter((f) => f.status === "confirmed");
-  if (confirmed.some((f) => f.severity === "blocking")) return "CHANGES_REQUIRED";
-  if (confirmed.length > 0) return "APPROVE_WITH_SUGGESTIONS";
+  // A finding whose fix was attempted and rejected still blocks — a failed
+  // fix never launders a blocking finding into an approval.
+  const active = verified.filter((f) => f.status === "confirmed" || f.status === "fix_failed");
+  if (active.some((f) => f.severity === "blocking")) return "CHANGES_REQUIRED";
+  if (active.length > 0) return "APPROVE_WITH_SUGGESTIONS";
   return "APPROVED";
 }

@@ -1,7 +1,7 @@
-import { annotateDiff, diffStats, parseDiff } from "./diff.js";
+import { annotateDiff, diffStats, lineDelta, parseDiff } from "./diff.js";
 import { gateFixerDiff } from "./diffGate.js";
-import { applyFix, proposeFix } from "./fixer.js";
-import { countFixerCommits, revertFile, workingTreeChanges, workingTreeHunks, workingTreeNumstat } from "./git.js";
+import { applyFix, proposeFix, readFileInRepo, writeFileInRepo } from "./fixer.js";
+import { countFixerCommits, workingTreeChanges, workingTreeHunks, workingTreeNumstat } from "./git.js";
 import { LENSES } from "./lenses.js";
 import { runReviewer } from "./reviewer.js";
 import { computeVerdict, verifyFindings } from "./synthesis.js";
@@ -78,8 +78,9 @@ export async function runPipeline(ctx: PipelineContext): Promise<PipelineResult>
       failedIds,
     );
     verdict = computeVerdict(verified);
-    const blocking = verified.filter((f) => f.status === "confirmed" && f.severity === "blocking");
-    const suggestions = verified.filter((f) => f.status === "confirmed" && f.severity === "suggestion");
+    const isActive = (f: VerifiedFinding) => f.status === "confirmed" || f.status === "fix_failed";
+    const blocking = verified.filter((f) => isActive(f) && f.severity === "blocking");
+    const suggestions = verified.filter((f) => isActive(f) && f.severity === "suggestion");
 
     if (verdict !== "CHANGES_REQUIRED") {
       rounds.push(round(r, verdict, blocking.length, suggestions.length, "no blocking findings left"));
@@ -145,26 +146,61 @@ async function attemptFix(
     return { ok: false, error: `fixer model call failed: ${(err as Error).message}` };
   }
 
+  // Snapshot the working tree BEFORE the fix, so the gate judges only the
+  // delta the Fixer produced — pre-existing local changes (e.g. interactive
+  // mode's applied sample diff) are not the Fixer's doing.
+  const preChanged = new Set(workingTreeChanges(repoRoot));
+  const preNumstat = new Map(workingTreeNumstat(repoRoot).map((n) => [n.path, n]));
+  const originalContent = readFileInRepo(repoRoot, target.file);
+  const rollback = () => writeFileInRepo(repoRoot, target.file, originalContent);
+
   const applied = applyFix(repoRoot, target.file, fix);
   if (!applied.ok) return { ok: false, error: applied.error ?? "apply failed" };
 
   // Guardrail: gate the diff the Fixer ACTUALLY produced, not what it said.
+  // The target file's delta is measured from content (before vs after) —
+  // numstat counts alone can miss an edit inside already-uncommitted lines.
+  const newContent = readFileInRepo(repoRoot, target.file);
+  const postNumstat = workingTreeNumstat(repoRoot);
+  const otherChanged = workingTreeChanges(repoRoot).filter((file) => {
+    if (file === target.file) return false;
+    if (!preChanged.has(file)) return true; // newly touched by the fix
+    const pre = preNumstat.get(file);
+    const post = postNumstat.find((n) => n.path === file);
+    return pre?.added !== post?.added || pre?.removed !== post?.removed;
+  });
+  const changedFiles = [
+    ...(newContent === originalContent ? [] : [target.file]),
+    ...otherChanged,
+  ];
+  const numstatDelta = [
+    { path: target.file, ...lineDelta(originalContent, newContent) },
+    ...otherChanged.map((file) => {
+      const pre = preNumstat.get(file) ?? { path: file, added: 0, removed: 0 };
+      const post = postNumstat.find((n) => n.path === file) ?? { path: file, added: 0, removed: 0 };
+      return {
+        path: file,
+        added: Math.max(0, post.added - pre.added),
+        removed: Math.max(0, post.removed - pre.removed),
+      };
+    }),
+  ];
   const gate = gateFixerDiff({
     allowedFile: target.file,
     findingLine: target.matchedLine ?? target.line,
-    changedFiles: workingTreeChanges(repoRoot),
-    numstat: workingTreeNumstat(repoRoot),
+    changedFiles,
+    numstat: numstatDelta,
     hunks: workingTreeHunks(repoRoot, target.file),
   });
   if (!gate.allowed) {
-    revertFile(repoRoot, target.file);
+    rollback();
     return { ok: false, error: `diff gate rejected the edit (${gate.reasons.join("; ")})` };
   }
 
   // Guardrail: the fix must keep the scoped unit tests green.
   const testsPassed = await reporter.retest();
   if (!testsPassed) {
-    revertFile(repoRoot, target.file);
+    rollback();
     return { ok: false, error: "the fix broke the scoped unit tests; reverted", testsPassed };
   }
 

@@ -87,6 +87,24 @@ export function annotateDiff(diffText: string): string {
   return out.join("\n");
 }
 
+/** Exact line delta between two versions of one file (common prefix/suffix
+ *  trimmed — precise for a single contiguous edit, which is all the Fixer
+ *  can produce). Content-based, so it also catches edits that leave
+ *  `git numstat` counts unchanged. */
+export function lineDelta(before: string, after: string): { added: number; removed: number } {
+  const a = before.split("\n");
+  const b = after.split("\n");
+  let start = 0;
+  while (start < a.length && start < b.length && a[start] === b[start]) start += 1;
+  let endA = a.length;
+  let endB = b.length;
+  while (endA > start && endB > start && a[endA - 1] === b[endB - 1]) {
+    endA -= 1;
+    endB -= 1;
+  }
+  return { removed: endA - start, added: endB - start };
+}
+
 export function diffStats(files: DiffFile[]): { fileCount: number; changedLines: number } {
   return {
     fileCount: files.length,
